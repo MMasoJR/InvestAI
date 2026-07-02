@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    background-color: #0b0f0e;
+    color: #e8e6de;
+  }
+
+  body {
+    font-family: theme("fontFamily.body");
+  }
+
+  ::selection {
+    background-color: #c9a227;
+    color: #0b0f0e;
+  }
+
+  /* Scrollbar discreta, combinando com o tema escuro */
+  ::-webkit-scrollbar {
+    width: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: #232b27;
+    border-radius: 4px;
+  }
+}
+
+@layer utilities {
+  /* Textura sutil de "papel de livro-caixa": linhas horizontais muito
+     discretas, só pra dar textura ao fundo sem chamar atenção sozinha. */
+  .ledger-texture {
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 27px,
+      rgba(232, 230, 222, 0.025) 28px
+    );
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
