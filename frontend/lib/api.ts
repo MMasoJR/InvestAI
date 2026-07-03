@@ -110,6 +110,7 @@ function dispatchEvents(events: StreamEvent[], callbacks: StreamCallbacks): void
     else if (event.type === "tool_call") callbacks.onToolCall(event.name, event.input);
     else if (event.type === "tool_result") callbacks.onToolResult(event.text);
     else if (event.type === "token") callbacks.onToken(event.text);
+    else if (event.type === "error") callbacks.onError(new Error(event.message));
     else if (event.type === "done") callbacks.onDone();
   }
 }
