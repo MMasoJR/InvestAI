@@ -39,9 +39,11 @@ def get_qdrant_client() -> QdrantClient:
 def get_indexer() -> QdrantIndexer:
     settings = get_settings()
     embedder = BGEM3Embedder()
-    return QdrantIndexer(
+    indexer = QdrantIndexer(
         client=get_qdrant_client(), embedder=embedder, collection_name=settings.collection_name
     )
+    indexer.ensure_collection()
+    return indexer
 
 
 @lru_cache

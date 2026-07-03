@@ -21,4 +21,5 @@ export type StreamEvent =
   | { type: "tool_call"; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; text: string }
   | { type: "token"; text: string }
+  | { type: "error"; message: string }
   | { type: "done" };

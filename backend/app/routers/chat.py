@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -18,6 +19,8 @@ from backend.app.services.assessor import AssessorService
 from backend.app.services.conversation_store import ConversationStore
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+logger = logging.getLogger("backend.routers.chat")
 
 
 def _history_as_messages(store: ConversationStore, conversation_id: str) -> list[dict]:
@@ -78,25 +81,29 @@ def chat_stream(
         accumulated_text: list[str] = []
         captured_sources: list[dict] = []
 
-        yield json.dumps({"type": "conversation", "conversation_id": conversation.id}, ensure_ascii=False) + "\n"
+        try:
+            yield json.dumps({"type": "conversation", "conversation_id": conversation.id}, ensure_ascii=False) + "\n"
 
-        for event in assessor.ask_stream(
-            request.question,
-            cnpj=request.cnpj,
-            statement_type=request.statement_type,
-            history=history,
-        ):
-            if event["type"] == "sources":
-                captured_sources = event["sources"]
-            elif event["type"] == "token":
-                accumulated_text.append(event["text"])
-            yield json.dumps(event, ensure_ascii=False) + "\n"
+            for event in assessor.ask_stream(
+                request.question,
+                cnpj=request.cnpj,
+                statement_type=request.statement_type,
+                history=history,
+            ):
+                if event["type"] == "sources":
+                    captured_sources = event["sources"]
+                elif event["type"] == "token":
+                    accumulated_text.append(event["text"])
+                yield json.dumps(event, ensure_ascii=False) + "\n"
 
-        store.add_message(
-            conversation.id,
-            role="assistant",
-            content="".join(accumulated_text),
-            sources=captured_sources,
-        )
+            store.add_message(
+                conversation.id,
+                role="assistant",
+                content="".join(accumulated_text),
+                sources=captured_sources,
+            )
+        except Exception as exc:
+            logger.exception("Erro durante streaming de chat para conversa %s", conversation.id)
+            yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")

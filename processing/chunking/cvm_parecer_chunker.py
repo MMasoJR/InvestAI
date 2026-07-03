@@ -1,9 +1,9 @@
 """
 Chunker dos arquivos de "parecer" da CVM — o Relatório do Auditor
 Independente (DFP) / Relatório da Revisão Especial (ITR), publicados pela
-CVM em `dfp_cia_aberta_parecer_AAAA.csv` / `itr_cia_aberta_parecer_AAAA.csv`.
+CVM em `dfp_cia_aberta_parecer_AAAA.csv` / `itr_cia_aberta_parecer_AAAA.csv`. 
 
-⚠️ AVISO IMPORTANTE SOBRE SCHEMA:
+⚠️ AVISO IMPORTANTE SOBRE O SCHEMA:
 No momento em que este módulo foi escrito, não havia acesso de rede
 disponível pra confirmar o nome EXATO da coluna que contém o texto do
 relatório (a CVM disponibiliza esse arquivo como ZIP, e a rede deste
@@ -42,7 +42,10 @@ logger = logging.getLogger("processing.chunking.cvm_parecer_chunker")
 
 # Colunas de identificação — mesma convenção usada nos arquivos de
 # demonstração (ver REQUIRED_COLUMNS / GROUP_KEYS em cvm_chunker.py).
-ID_COLUMNS = ["CNPJ_CIA", "DENOM_CIA", "CD_CVM", "DT_REFER", "ORDEM_EXERC"]
+# Colunas confirmadas presentes nos arquivos de parecer reais da CVM.
+# CD_CVM e ORDEM_EXERC NÃO existem nesses arquivos (schema real diferente
+# das demonstrações financeiras BPA/BPP/DRE) — confirmado em execução real.
+ID_COLUMNS = ["CNPJ_CIA", "DENOM_CIA", "DT_REFER"]
 
 # Colunas que claramente NÃO são o texto do relatório, mesmo que sejam
 # string — excluídas da heurística de detecção da coluna de texto.
@@ -130,6 +133,8 @@ def build_parecer_chunks(
 
     resolved_text_column = text_column or detect_text_column(df)
     has_period_end = "DT_FIM_EXERC" in df.columns
+    has_cd_cvm = "CD_CVM" in df.columns
+    has_ordem_exerc = "ORDEM_EXERC" in df.columns
 
     chunks: list[ParecerChunk] = []
     for _, row in df.iterrows():
@@ -137,14 +142,17 @@ def build_parecer_chunks(
         if not isinstance(raw_text, str) or not raw_text.strip():
             continue
 
+        period_end = str(row["DT_FIM_EXERC"]) if has_period_end else str(row["DT_REFER"])
+        cd_cvm = str(row["CD_CVM"]) if has_cd_cvm else "0"
+        ordem_exerc = str(row["ORDEM_EXERC"]) if has_ordem_exerc else "ÚNICO"
+
         pieces = chunk_text(raw_text, max_chars=max_chars, overlap_chars=overlap_chars)
         total = len(pieces)
-        period_end = str(row["DT_FIM_EXERC"]) if has_period_end else str(row["DT_REFER"])
 
         for index, piece in enumerate(pieces):
             chunk_id = (
-                f"{row['CNPJ_CIA']}_{row['CD_CVM']}_{period_end}_"
-                f"{row['ORDEM_EXERC']}_parecer_{index}"
+                f"{row['CNPJ_CIA']}_{cd_cvm}_{period_end}_"
+                f"{ordem_exerc}_parecer_{index}"
             ).replace(" ", "_")
 
             chunks.append(
@@ -152,10 +160,10 @@ def build_parecer_chunks(
                     text=piece,
                     cnpj=str(row["CNPJ_CIA"]),
                     company_name=str(row["DENOM_CIA"]),
-                    cd_cvm=str(row["CD_CVM"]),
+                    cd_cvm=cd_cvm,
                     reference_date=str(row["DT_REFER"]),
                     period_end=period_end,
-                    exercise_order=str(row["ORDEM_EXERC"]),
+                    exercise_order=ordem_exerc,
                     source_doc_type=doc_type,
                     chunk_index=index,
                     total_chunks=total,
