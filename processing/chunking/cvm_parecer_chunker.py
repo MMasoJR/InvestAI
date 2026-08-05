@@ -1,30 +1,24 @@
 """
 Chunker dos arquivos de "parecer" da CVM — o Relatório do Auditor
-Independente (DFP) / Relatório da Revisão Especial (ITR), publicados pela
-CVM em `dfp_cia_aberta_parecer_AAAA.csv` / `itr_cia_aberta_parecer_AAAA.csv`. 
+Independente / Declaração dos Diretores, publicados em:
+  dfp_cia_aberta_parecer_AAAA.csv / itr_cia_aberta_parecer_AAAA.csv
 
-⚠️ AVISO IMPORTANTE SOBRE O SCHEMA:
-No momento em que este módulo foi escrito, não havia acesso de rede
-disponível pra confirmar o nome EXATO da coluna que contém o texto do
-relatório (a CVM disponibiliza esse arquivo como ZIP, e a rede deste
-ambiente de desenvolvimento bloqueia o domínio dados.cvm.gov.br). Por isso,
-em vez de hard-codar um nome de coluna que poderia estar errado, este
-módulo DETECTA AUTOMATICAMENTE a coluna de texto: escolhe, entre as
-colunas de texto livre (string), a que tem o maior tamanho médio de
-conteúdo — heurística sólida, já que o texto do relatório do auditor é,
-de longe, o campo mais longo desse arquivo.
+Schema real confirmado nos dados da CVM (todos os anos testados):
+  CNPJ_CIA              — CNPJ da empresa
+  DT_REFER              — data de referência
+  VERSAO                — versão do documento
+  DENOM_CIA             — nome da empresa
+  TP_RELAT_AUD          — tipo do relatório de auditoria (pode ser NaN)
+  TP_PARECER_DECL       — categoria do item (~51 chars, ex: "Declaração dos Diretores...")
+  NUM_ITEM_PARECER_DECL — número do item (cada empresa tem 3-5 itens)
+  TXT_PARECER_DECL      — o texto real (~2114 chars médios por item)
 
-Quando você rodar isso na sua máquina (com internet livre), vale a pena
-conferir uma vez se a detecção pegou a coluna certa — print(chunk.text[:200])
-de um chunk e veja se parece o início de um relatório de auditoria. Se a
-heurística errar, passe o nome da coluna manualmente via o parâmetro
-`text_column` de `build_parecer_chunks`.
-
-As colunas de identificação (CNPJ_CIA, DENOM_CIA, CD_CVM, DT_REFER,
-ORDEM_EXERC) seguem o mesmo padrão confirmado nos arquivos de demonstração
-(BPA/BPP/DRE/...) do mesmo conjunto de dados da CVM — essas, sim, têm alta
-confiança de estarem corretas, por já estarem documentadas/validadas no
-restante do projeto (ver cvm_chunker.py).
+Lógica central:
+  Cada empresa tem MÚLTIPLAS linhas (um item por linha). Este chunker
+  AGRUPA todos os itens da mesma empresa+data, concatena os textos, e
+  depois divide o texto completo em chunks menores se necessário.
+  Isso garante que o contexto de cada empresa seja coeso, não fragmentado
+  em pedaços sem relação entre si.
 """
 from __future__ import annotations
 
@@ -40,19 +34,21 @@ from processing.chunking.text_chunker import chunk_text
 
 logger = logging.getLogger("processing.chunking.cvm_parecer_chunker")
 
-# Colunas de identificação — mesma convenção usada nos arquivos de
-# demonstração (ver REQUIRED_COLUMNS / GROUP_KEYS em cvm_chunker.py).
-# Colunas confirmadas presentes nos arquivos de parecer reais da CVM.
-# CD_CVM e ORDEM_EXERC NÃO existem nesses arquivos (schema real diferente
-# das demonstrações financeiras BPA/BPP/DRE) — confirmado em execução real.
+# Colunas de identificação obrigatórias (confirmadas no schema real da CVM).
 ID_COLUMNS = ["CNPJ_CIA", "DENOM_CIA", "DT_REFER"]
 
-# Colunas que claramente NÃO são o texto do relatório, mesmo que sejam
-# string — excluídas da heurística de detecção da coluna de texto.
+# Coluna de texto principal — confirmada nos dados reais.
+# A heurística de detecção automática é mantida como fallback, mas agora
+# também tentamos este nome primeiro.
+TEXT_COLUMN_PRIMARY = "TXT_PARECER_DECL"
+
+# Colunas que NÃO são texto livre — excluídas da heurística.
 KNOWN_NON_TEXT_COLUMNS = {
     "CNPJ_CIA", "DENOM_CIA", "CD_CVM", "GRUPO_DFP", "MOEDA", "ESCALA_MOEDA",
     "ORDEM_EXERC", "DT_REFER", "DT_FIM_EXERC", "DT_INI_EXERC", "VERSAO",
     "DT_RECEB", "LINK_DOC", "CD_CONTA", "DS_CONTA",
+    # Colunas do parecer que são categorias/índices, não texto livre:
+    "TP_RELAT_AUD", "TP_PARECER_DECL", "NUM_ITEM_PARECER_DECL",
 }
 
 DEFAULT_MAX_CHARS = 1500
@@ -61,7 +57,7 @@ DEFAULT_OVERLAP_CHARS = 200
 
 @dataclass(frozen=True)
 class ParecerChunk:
-    """Um pedaço do relatório do auditor independente, pronto para embedding."""
+    """Um pedaço do relatório do auditor/declaração dos diretores, pronto para embedding."""
 
     text: str
     cnpj: str
@@ -71,8 +67,8 @@ class ParecerChunk:
     period_end: str
     exercise_order: str
     source_doc_type: str
-    chunk_index: int    # posição deste pedaço dentro do relatório completo
-    total_chunks: int   # quantos pedaços o relatório completo gerou
+    chunk_index: int
+    total_chunks: int
     statement_type: str = "Relatório do Auditor Independente"
     chunk_id: str = field(default="")
 
@@ -85,14 +81,15 @@ class ParecerChunk:
 
 def detect_text_column(df: pd.DataFrame) -> str:
     """
-    Detecta a coluna que contém o texto do relatório, escolhendo — entre as
-    colunas de tipo texto que não são identificação conhecida — a que tem o
-    maior tamanho médio de conteúdo. Ver aviso no topo do arquivo.
-
-    Usa `pd.api.types.is_string_dtype` (não comparação direta com `object`)
-    pra funcionar tanto no pandas 2.x (onde strings são dtype `object`)
-    quanto no pandas 3.x (onde existe um dtype `str` dedicado).
+    Detecta a coluna de texto do relatório. Tenta o nome canônico primeiro
+    ('TXT_PARECER_DECL'); se não existir, cai para heurística (coluna string
+    com maior tamanho médio, excluindo as colunas de identificação/categoria).
     """
+    if TEXT_COLUMN_PRIMARY in df.columns:
+        logger.debug("Usando coluna canônica '%s'", TEXT_COLUMN_PRIMARY)
+        return TEXT_COLUMN_PRIMARY
+
+    # Fallback heurístico — para anos com schema diferente
     candidates = [
         col for col in df.columns
         if col not in KNOWN_NON_TEXT_COLUMNS and pd.api.types.is_string_dtype(df[col])
@@ -105,7 +102,7 @@ def detect_text_column(df: pd.DataFrame) -> str:
 
     avg_lengths = {col: df[col].astype(str).str.len().mean() for col in candidates}
     best_column = max(avg_lengths, key=avg_lengths.get)
-    logger.debug("Coluna de texto detectada: '%s' (tamanho médio: %.0f chars)", best_column, avg_lengths[best_column])
+    logger.debug("Heurística detectou: '%s' (tamanho médio: %.0f chars)", best_column, avg_lengths[best_column])
     return best_column
 
 
@@ -117,12 +114,10 @@ def build_parecer_chunks(
     overlap_chars: int = DEFAULT_OVERLAP_CHARS,
 ) -> list[ParecerChunk]:
     """
-    Recebe um DataFrame lido de um Parquet de 'parecer' e retorna a lista de
-    chunks (um relatório pode virar vários chunks, se for longo).
+    Recebe um DataFrame de 'parecer' e retorna chunks prontos para embedding.
 
-    Levanta ValueError se as colunas de identificação mínimas não existirem
-    — isso permite que load_parecer_chunks pule, com segurança, arquivos
-    que não sejam de fato um 'parecer' (mesmo padrão usado em cvm_chunker.py).
+    Agrupa os itens de cada empresa (mesmo CNPJ + data) antes de chunkar —
+    assim cada empresa vira um texto coeso, não linhas soltas sem contexto.
     """
     missing_id_columns = [c for c in ID_COLUMNS if c not in df.columns]
     if missing_id_columns:
@@ -132,36 +127,66 @@ def build_parecer_chunks(
         )
 
     resolved_text_column = text_column or detect_text_column(df)
+
+    # Colunas opcionais — nem todos os anos têm todas
     has_period_end = "DT_FIM_EXERC" in df.columns
     has_cd_cvm = "CD_CVM" in df.columns
     has_ordem_exerc = "ORDEM_EXERC" in df.columns
 
+    # Agrupa por empresa + data de referência e concatena todos os itens
+    group_keys = ["CNPJ_CIA", "DENOM_CIA", "DT_REFER"]
+    if has_period_end:
+        group_keys.append("DT_FIM_EXERC")
+
     chunks: list[ParecerChunk] = []
-    for _, row in df.iterrows():
-        raw_text = row.get(resolved_text_column)
-        if not isinstance(raw_text, str) or not raw_text.strip():
+
+    for group_values, group_df in df.groupby(group_keys, dropna=False):
+        if isinstance(group_values, str):
+            group_values = (group_values,)
+
+        cnpj = str(group_values[0])
+        denom_cia = str(group_values[1])
+        dt_refer = str(group_values[2])
+        period_end = str(group_values[3]) if has_period_end else dt_refer
+
+        cd_cvm = str(group_df["CD_CVM"].iloc[0]) if has_cd_cvm else "0"
+        ordem_exerc = str(group_df["ORDEM_EXERC"].iloc[0]) if has_ordem_exerc else "ÚNICO"
+
+        # Ordena pelo número do item antes de concatenar, se disponível
+        if "NUM_ITEM_PARECER_DECL" in group_df.columns:
+            group_df = group_df.sort_values("NUM_ITEM_PARECER_DECL")
+
+        # Concatena o tipo + texto de cada item em sequência
+        text_parts = []
+        for _, row in group_df.iterrows():
+            tipo = row.get("TP_PARECER_DECL", "")
+            texto = row.get(resolved_text_column, "")
+            if not isinstance(texto, str) or not texto.strip():
+                continue
+            if isinstance(tipo, str) and tipo.strip():
+                text_parts.append(f"[{tipo.strip()}]\n{texto.strip()}")
+            else:
+                text_parts.append(texto.strip())
+
+        full_text = "\n\n".join(text_parts)
+        if not full_text.strip():
             continue
 
-        period_end = str(row["DT_FIM_EXERC"]) if has_period_end else str(row["DT_REFER"])
-        cd_cvm = str(row["CD_CVM"]) if has_cd_cvm else "0"
-        ordem_exerc = str(row["ORDEM_EXERC"]) if has_ordem_exerc else "ÚNICO"
-
-        pieces = chunk_text(raw_text, max_chars=max_chars, overlap_chars=overlap_chars)
+        pieces = chunk_text(full_text, max_chars=max_chars, overlap_chars=overlap_chars)
         total = len(pieces)
 
         for index, piece in enumerate(pieces):
             chunk_id = (
-                f"{row['CNPJ_CIA']}_{cd_cvm}_{period_end}_"
-                f"{ordem_exerc}_parecer_{index}"
+                f"{cnpj}_{cd_cvm}_{period_end}_{ordem_exerc}_parecer_{index}"
             ).replace(" ", "_")
 
             chunks.append(
                 ParecerChunk(
                     text=piece,
-                    cnpj=str(row["CNPJ_CIA"]),
-                    company_name=str(row["DENOM_CIA"]),
+                    cnpj=cnpj,
+                    company_name=denom_cia,
                     cd_cvm=cd_cvm,
-                    reference_date=str(row["DT_REFER"]),
+                    reference_date=dt_refer,
                     period_end=period_end,
                     exercise_order=ordem_exerc,
                     source_doc_type=doc_type,
@@ -176,7 +201,7 @@ def build_parecer_chunks(
 
 
 def deduplicate_parecer_chunks(chunks: Iterable[ParecerChunk]) -> list[ParecerChunk]:
-    """Mesma lógica de dedup usada em cvm_chunker.py — evita repetição entre anos."""
+    """Remove duplicatas entre anos (o mesmo período aparece como 'PENÚLTIMO' no ano seguinte)."""
     seen: set[tuple] = set()
     result: list[ParecerChunk] = []
     for chunk in chunks:
@@ -190,10 +215,8 @@ def deduplicate_parecer_chunks(chunks: Iterable[ParecerChunk]) -> list[ParecerCh
 
 def load_parecer_parquet_dir_chunks(processed_dir: Path, doc_type: str) -> list[ParecerChunk]:
     """
-    Varre os Parquets processados em busca especificamente dos arquivos de
-    'parecer' (identificados pelo nome do arquivo, ex.:
-    dfp_cia_aberta_parecer_2023.parquet) e retorna a lista completa de
-    chunks já deduplicados.
+    Varre os Parquets processados buscando arquivos de 'parecer' e retorna
+    a lista completa de chunks já deduplicados.
     """
     all_chunks: list[ParecerChunk] = []
     parecer_files = sorted(processed_dir.rglob("*parecer*.parquet"))
@@ -220,7 +243,7 @@ def load_parecer_parquet_dir_chunks(processed_dir: Path, doc_type: str) -> list[
 
 
 def export_parecer_chunks_to_jsonl(chunks: Iterable[ParecerChunk], output_path: Path) -> int:
-    """Exporta os chunks de parecer para JSONL — mesmo formato usado pelos chunks de demonstração."""
+    """Exporta os chunks para JSONL — mesmo formato dos chunks de demonstração."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with output_path.open("w", encoding="utf-8") as f:
